@@ -50,11 +50,11 @@ public class StreamingGetMongo extends AbstractProcessor {
 
 
 
-    private static final PropertyDescriptor COLLECTION_REGEX = new PropertyDescriptor.Builder()
-            .name("Mongo Collection Regex")
-            .description("The regex to match collections. Uses java.util regexes. The default of '.*' matches all collections")
+    private static final PropertyDescriptor COLLECTION_NAME = new PropertyDescriptor.Builder()
+            .name("Mongo Collection Name")
+            .description("The name of the collection to pull records from.")
             .required(true)
-            .defaultValue(".*")
+            .defaultValue("")
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
@@ -66,7 +66,7 @@ public class StreamingGetMongo extends AbstractProcessor {
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
-    private final static Relationship REL_SUCCESS = new Relationship.Builder().name("success").description("All good documents go this way").build();
+    private final static Relationship REL_SUCCESS = new Relationship.Builder().name("success").description("All documents go this way").build();
 
     private final static Set<Relationship> relationships; 
 
@@ -75,7 +75,7 @@ public class StreamingGetMongo extends AbstractProcessor {
     static {
         List<PropertyDescriptor> _propertyDescriptors = new ArrayList<>();
         _propertyDescriptors.addAll(MongoWrapper.descriptors);
-        _propertyDescriptors.add(COLLECTION_REGEX);
+        _propertyDescriptors.add(COLLECTION_NAME);
         _propertyDescriptors.add(WAIT_TIME);
         propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
 
@@ -100,7 +100,7 @@ public class StreamingGetMongo extends AbstractProcessor {
 
     @OnScheduled
     public final void initPattern(ProcessContext context) {
-        userCollectionNamePattern = Pattern.compile(context.getProperty(COLLECTION_REGEX).getValue());
+        userCollectionNamePattern = Pattern.compile(context.getProperty(COLLECTION_NAME).getValue());
     }
 
     @OnScheduled
@@ -121,7 +121,7 @@ public class StreamingGetMongo extends AbstractProcessor {
       for(String name: names) {
         if(userCollectionNamePattern.matcher(name).matches()) {
           userCollectionNames.add(name);
-          getLogger().debug("Adding collectionName: {} due to match of {}", new Object[] {name, context.getProperty(COLLECTION_REGEX).getValue()});
+          getLogger().debug("Adding collectionName: {} due to match of {}", new Object[] {name, context.getProperty(COLLECTION_NAME).getValue()});
         }
       }
       return userCollectionNames;
@@ -130,13 +130,6 @@ public class StreamingGetMongo extends AbstractProcessor {
     
     @Override
     public final void onTrigger(final ProcessContext context, final ProcessSession session) {
-      FlowFile flowFile = session.get();
-      if (flowFile == null) {
-          return;
-      }
-
-      final String mongoObjectId = flowFile.getAttribute("mongoObjectId");
-
       for(String collectionName: getUserCollectionNames(context)) {
         if(MongoWrapper.systemIndexesPattern.matcher(collectionName).matches()) {
           continue;
@@ -146,15 +139,25 @@ public class StreamingGetMongo extends AbstractProcessor {
         final Long waitMillis = Long.parseLong(context.getProperty(WAIT_TIME).getValue());
 
         try {
-            final FindIterable<Document> it = collection.find(gt("_id", mongoObjectId));
+            FlowFile ff = session.get();
+            if (ff == null) {
+                return;
+      	    }
+
+	    final String mongoObjectId = ff.getAttribute("mongoObjectId");
+	    getLogger().info("Find object with _id greater than or equal to: {}", new Object[] {mongoObjectId});
+            session.remove(ff); 
+
+            final FindIterable<Document> it = collection.find(gte("_id", new ObjectId(mongoObjectId)));
             final MongoCursor<Document> cursor = it.iterator();
             final String dbName = mongoWrapper.getDatabase(context).getName();
 
             try {
                 while (cursor.hasNext()) {
 //                    ProcessSession session = sessionFactory.createSession();
+                    
 
-//                    FlowFile flowFile = session.create();
+                    FlowFile flowFile = session.create();
 
                     final Document currentDoc = cursor.next();
                     ObjectId currentObjectId = currentDoc.getObjectId("_id");
@@ -164,6 +167,7 @@ public class StreamingGetMongo extends AbstractProcessor {
                     flowFile = session.putAttribute(flowFile, "mongo.op", "q");
                     flowFile = session.putAttribute(flowFile, "mongo.db", dbName);
                     flowFile = session.putAttribute(flowFile, "mongo.collection", collectionName);
+                    getLogger().info("fetch object _id: {}", new Object[] {currentObjectId});
 
                     flowFile = session.write(flowFile, new OutputStreamCallback() {
                                 @Override
@@ -174,7 +178,6 @@ public class StreamingGetMongo extends AbstractProcessor {
 
                     session.getProvenanceReporter().receive(flowFile, mongoWrapper.getURI(context));
                     session.transfer(flowFile, REL_SUCCESS);
-                    session.commit();
                     Thread.sleep(waitMillis);
                 }
             } catch (final InterruptedException e) {
